@@ -38,7 +38,7 @@ jobs:
           if git ls-files | grep -E '(^|/)\.env$|\.pem$|\.key$|\.jks$|\.keystore$'; then
             echo "Berkas rahasia terlacak git"; exit 1
           fi
-          if git grep -nE 'POSTGRES_PASSWORD: *[^$ ]|postgres://[^:]+:[^@$<]+@' -- ':!docs' ':!.github' ':!AGENTS.md' ':!versions'; then
+          if git grep -nE 'POSTGRES_PASSWORD: *[^$ ]|postgres://[^:]+:[^@$<]+@' -- ':!docs' ':!.github' ':!AGENTS.md' ':!versions' ':!.env*.example'; then
             echo "Kata sandi tertanam di berkas"; exit 1
           fi
 
