@@ -1,12 +1,160 @@
 name: ci
+
+# CI lintas-repo Pasaree (PSR-OPS-002). Repo pasaree-* berstatus publik,
+# jadi checkout tidak butuh token tambahan. Gate akhir `gerbang-qa`
+# gagal bila satu job merah (QA-002); jadikan job itu required check.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * *" # 03:00 WIB, deteksi regresi lintas-repo
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ORG: Coding-Skuy
+
 jobs:
-  periksa:
+  infra:
+    name: infra (compose + tautan + rahasia)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Periksa tautan TownHall
         run: test -f README.md && grep -q Pasaree-TownHall README.md
+      - name: Validasi compose
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+      - name: Larang rahasia di repo
+        run: |
+          if git ls-files | grep -E '(^|/)\.env$|\.pem$|\.key$|\.jks$|\.keystore$'; then
+            echo "Berkas rahasia terlacak git"; exit 1
+          fi
+          if git grep -nE 'POSTGRES_PASSWORD: *[^$ ]|postgres://[^:]+:[^@$<]+@' -- ':!docs' ':!.github' ':!AGENTS.md' ':!versions'; then
+            echo "Kata sandi tertanam di berkas"; exit 1
+          fi
+
+  backend:
+    name: pasaree-backend-service (cargo test + openapi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ORG }}/pasaree-backend-service
+          path: repo
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: repo
+      - name: cargo test
+        working-directory: repo
+        run: cargo test --locked
+      - name: cargo clippy
+        working-directory: repo
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Lint OpenAPI
+        working-directory: repo
+        run: npx --yes @redocly/cli@1 lint docs/api/openapi.yaml
+
+  web:
+    name: pasaree-web (svelte-check + bun test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ORG }}/pasaree-web
+          path: repo
+      - uses: oven-sh/setup-bun@v2
+      - name: Pasang dependensi
+        working-directory: repo
+        run: bun install --frozen-lockfile
+      - name: svelte-check
+        working-directory: repo
+        run: bun run check
+      - name: bun test
+        working-directory: repo
+        run: bun test
+
+  app-kmp:
+    name: pasaree-app-kmp (gradle build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ORG }}/pasaree-app-kmp
+          path: repo
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Gradle build + uji
+        working-directory: repo
+        run: ./gradlew build --no-daemon
+
+  python:
+    name: ${{ matrix.repo }} (pytest)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: [pasaree-ai-models, pasaree-data-pipeline]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ORG }}/${{ matrix.repo }}
+          path: repo
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Pasang paket + pytest
+        working-directory: repo
+        run: |
+          python -m pip install --upgrade pip pytest
+          pip install -e .
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: pytest
+        working-directory: repo
+        run: pytest -q
+
+  design:
+    name: pasaree-design (validasi token)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ORG }}/pasaree-design
+          path: repo
+      - uses: oven-sh/setup-bun@v2
+      - name: Validasi token desain
+        working-directory: repo
+        run: |
+          # ASUMSI: skrip `validate:tokens` di package.json; ganti bila repo desain memakai nama lain.
+          if [ -f package.json ] && grep -q '"validate:tokens"' package.json; then
+            bun install --frozen-lockfile && bun run validate:tokens
+          else
+            echo "Skrip validate:tokens belum ada di pasaree-design"; exit 1
+          fi
+
+  gerbang-qa:
+    name: gerbang-qa (rilis diblokir bila merah)
+    if: always()
+    needs: [infra, backend, web, app-kmp, python, design]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluasi hasil
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "QA gate gagal"; exit 1
+          fi
