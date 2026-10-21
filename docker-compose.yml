@@ -1,28 +1,46 @@
+# Compose lokal Pasaree (PSR-OPS-003). Semua nilai sensitif dibaca dari `.env`
+# (salin dari `.env.example`); tidak ada kata sandi tertanam di berkas ini.
 services:
   db:
     image: postgres:16
     environment:
       POSTGRES_DB: pasaree
-      POSTGRES_USER: pasaree
-      POSTGRES_PASSWORD: rahasia
+      POSTGRES_USER: ${POSTGRES_USER:-pasaree}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?isi POSTGRES_PASSWORD di .env}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:${DB_HOST_PORT:-5433}:5432"
     volumes:
       - pasaree-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pasaree} -d pasaree"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   backend:
+    # Bergantung: pasaree-backend-service wajib punya Dockerfile (belum ada).
     build: ../pasaree-backend-service
     environment:
-      DATABASE_URL: postgres://pasaree:rahasia@db:5432/pasaree
+      DATABASE_URL: postgres://${POSTGRES_USER:-pasaree}:${POSTGRES_PASSWORD}@db:5432/pasaree
       JWT_AUD: pasaree
+      JWT_SECRET: ${JWT_SECRET:?isi JWT_SECRET di .env}
+      LUMBUNG_SERVICE_KEY: ${LUMBUNG_SERVICE_KEY:-}
     ports:
       - "8101:8101"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8101/kesehatan || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
   web:
     image: oven/bun:1.4
     working_dir: /app
     volumes:
       - ../pasaree-web:/app
+    environment:
+      PASAREE_API_BASE_URL: http://backend:8101
     command: bun run dev --port 8102 --host 0.0.0.0
     ports:
       - "8102:8102"
