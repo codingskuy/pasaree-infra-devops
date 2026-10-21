@@ -1,0 +1,37 @@
+name: kesehatan
+
+# Pemantauan /kesehatan (PSR-OPS-005). Aktif bila variabel repo
+# PASAREE_HEALTH_URL diisi (mis. https://api.pasaree.example/kesehatan).
+# Merah = alarm: GitHub mengirim notifikasi kegagalan workflow terjadwal;
+# secret opsional ALERT_WEBHOOK_URL menambah kirim ke kanal tim.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cek:
+    runs-on: ubuntu-latest
+    env:
+      PASAREE_HEALTH_URL: ${{ vars.PASAREE_HEALTH_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lewati bila URL belum diatur
+        if: env.PASAREE_HEALTH_URL == ''
+        run: echo "PASAREE_HEALTH_URL belum diatur; pemantauan dilewati"
+      - name: Periksa /kesehatan
+        if: env.PASAREE_HEALTH_URL != ''
+        run: scripts/cek-kesehatan.sh "$PASAREE_HEALTH_URL"
+      - name: Kirim alarm
+        if: failure() && env.PASAREE_HEALTH_URL != ''
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          if [ -n "$ALERT_WEBHOOK_URL" ]; then
+            curl -fsS -X POST -H 'Content-Type: application/json' \
+              -d '{"text":"ALARM Pasaree: /kesehatan gagal. Lihat runbook docs/pemantauan.md"}' \
+              "$ALERT_WEBHOOK_URL"
+          fi
